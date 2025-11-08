@@ -6,7 +6,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.*;
-import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
@@ -23,36 +22,16 @@ public class RouterService {
 
     private final String chatServiceBaseUrl = "http://localhost:8110/api/chat";
 
-    private HttpHeaders createHeadersWithJwt(Jwt jwt) {
+    private HttpHeaders createHeaders() {
         HttpHeaders headers = new HttpHeaders();
-        headers.setBearerAuth(jwt.getTokenValue());
         headers.setContentType(MediaType.APPLICATION_JSON);
         return headers;
     }
 
-    private String extractUserId(Jwt jwt) {
-        try {
-            if (jwt.hasClaim("user_id"))
-                return jwt.getClaimAsString("user_id");
-
-            if (jwt.hasClaim("preferred_username"))
-                return jwt.getClaimAsString("preferred_username");
-
-            if (jwt.hasClaim("email"))
-                return jwt.getClaimAsString("email");
-
-            return jwt.getSubject();
-        } catch (Exception e) {
-            log.error("Failed to extract user_id from JWT: {}", e.getMessage());
-            return jwt.getSubject();
-        }
-    }
-
-    public List<ChatRes> getAllChats(Jwt jwt) {
-        String userId = extractUserId(jwt);
+    public List<ChatRes> getAllChats(String userId) {
         try {
             String url = chatServiceBaseUrl + "/list/" + userId;
-            HttpEntity<Void> entity = new HttpEntity<>(null, createHeadersWithJwt(jwt));
+            HttpEntity<Void> entity = new HttpEntity<>(createHeaders());
 
             ResponseEntity<List<ChatRes>> response = restTemplate.exchange(
                     url,
@@ -67,38 +46,31 @@ public class RouterService {
         }
     }
 
-    public ChatRes getChat(long chatId, Jwt jwt) {
+    public ChatRes getChat(long chatId, String userId) {
         try {
             String url = chatServiceBaseUrl + "/" + chatId;
-            HttpEntity<Void> entity = new HttpEntity<>(null, createHeadersWithJwt(jwt));
+            HttpEntity<Void> entity = new HttpEntity<>(createHeaders());
 
             ResponseEntity<ChatRes> response = restTemplate.exchange(
                     url, HttpMethod.GET, entity, ChatRes.class
             );
 
+            // Проверяем, принадлежит ли чат пользователю
             ChatRes chat = response.getBody();
-            if (chat == null) return null;
-
-            String userId = extractUserId(jwt);
-            if (!userId.equals(chat.getUserId())) {
-                log.warn("Access denied to chat {} by user {}", chatId, userId);
-                return null;
+            if (chat != null && userId.equals(chat.getUserId())) {
+                return chat;
             }
-
-            return chat;
+            return null;
         } catch (Exception e) {
             log.error("Error fetching chat {}: {}", chatId, e.getMessage());
             return null;
         }
     }
 
-    public Long createChat(CreateChatRq createChatRq, Jwt jwt) {
+    public Long createChat(CreateChatRq createChatRq) {
         try {
-            String userId = extractUserId(jwt);
-            createChatRq.setUserId(userId);
-
             String url = chatServiceBaseUrl + "/create";
-            HttpEntity<CreateChatRq> entity = new HttpEntity<>(createChatRq, createHeadersWithJwt(jwt));
+            HttpEntity<CreateChatRq> entity = new HttpEntity<>(createChatRq, createHeaders());
 
             ResponseEntity<Long> response = restTemplate.postForEntity(url, entity, Long.class);
             return response.getBody();
@@ -108,10 +80,16 @@ public class RouterService {
         }
     }
 
-    public boolean setPrompt(SetPromptRq setPromptRq, Jwt jwt) {
+    public boolean setPrompt(SetPromptRq setPromptRq, String userId) {
         try {
+            // Сначала проверяем доступ к чату
+            ChatRes chat = getChat(setPromptRq.getChatId(), userId);
+            if (chat == null) {
+                return false;
+            }
+
             String url = chatServiceBaseUrl + "/setPrompt";
-            HttpEntity<SetPromptRq> entity = new HttpEntity<>(setPromptRq, createHeadersWithJwt(jwt));
+            HttpEntity<SetPromptRq> entity = new HttpEntity<>(setPromptRq, createHeaders());
 
             ResponseEntity<Void> response = restTemplate.postForEntity(url, entity, Void.class);
             return response.getStatusCode().is2xxSuccessful();
@@ -121,10 +99,16 @@ public class RouterService {
         }
     }
 
-    public boolean renameChat(RenameChatRq renameChatRq, Jwt jwt) {
+    public boolean renameChat(RenameChatRq renameChatRq, String userId) {
         try {
+            // Проверяем доступ к чату
+            ChatRes chat = getChat(renameChatRq.getChatId(), userId);
+            if (chat == null) {
+                return false;
+            }
+
             String url = chatServiceBaseUrl + "/rename";
-            HttpEntity<RenameChatRq> entity = new HttpEntity<>(renameChatRq, createHeadersWithJwt(jwt));
+            HttpEntity<RenameChatRq> entity = new HttpEntity<>(renameChatRq, createHeaders());
 
             restTemplate.exchange(url, HttpMethod.PUT, entity, Void.class);
             return true;
@@ -134,10 +118,16 @@ public class RouterService {
         }
     }
 
-    public boolean deleteChat(long chatId, Jwt jwt) {
+    public boolean deleteChat(long chatId, String userId) {
         try {
+            // Проверяем доступ к чату
+            ChatRes chat = getChat(chatId, userId);
+            if (chat == null) {
+                return false;
+            }
+
             String url = chatServiceBaseUrl + "/delete/" + chatId;
-            HttpEntity<Void> entity = new HttpEntity<>(null, createHeadersWithJwt(jwt));
+            HttpEntity<Void> entity = new HttpEntity<>(createHeaders());
 
             restTemplate.exchange(url, HttpMethod.DELETE, entity, Void.class);
             return true;
@@ -147,13 +137,13 @@ public class RouterService {
         }
     }
 
-    public List<MessageRes> getMessages(long chatId, Jwt jwt) {
+    public List<MessageRes> getMessages(long chatId, String userId) {
         try {
-            ChatRes chat = getChat(chatId, jwt);
+            ChatRes chat = getChat(chatId, userId);
             if (chat == null) return Collections.emptyList();
 
             String url = chatServiceBaseUrl + "/messages/" + chatId;
-            HttpEntity<Void> entity = new HttpEntity<>(null, createHeadersWithJwt(jwt));
+            HttpEntity<Void> entity = new HttpEntity<>(createHeaders());
 
             ResponseEntity<List<MessageRes>> response = restTemplate.exchange(
                     url,
@@ -168,16 +158,16 @@ public class RouterService {
         }
     }
 
-    public WriteToChatRs writeToChat(WriteToChatRq writeToChatRq, Jwt jwt) {
+    public WriteToChatRs writeToChat(WriteToChatRq writeToChatRq, String userId) {
         try {
-            ChatRes chat = getChat(writeToChatRq.getChatId(), jwt);
+            ChatRes chat = getChat(writeToChatRq.getChatId(), userId);
             if (chat == null) {
-                log.warn("User {} tried to write to foreign or nonexistent chat {}", extractUserId(jwt), writeToChatRq.getChatId());
+                log.warn("User {} tried to write to foreign or nonexistent chat {}", userId, writeToChatRq.getChatId());
                 return null;
             }
 
             String url = chatServiceBaseUrl + "/write";
-            HttpEntity<WriteToChatRq> entity = new HttpEntity<>(writeToChatRq, createHeadersWithJwt(jwt));
+            HttpEntity<WriteToChatRq> entity = new HttpEntity<>(writeToChatRq, createHeaders());
 
             ResponseEntity<WriteToChatRs> response = restTemplate.postForEntity(url, entity, WriteToChatRs.class);
             return response.getBody();
@@ -187,4 +177,3 @@ public class RouterService {
         }
     }
 }
-
